@@ -8,8 +8,68 @@
 
 pthread_rwlock_t bus_lock = PTHREAD_RWLOCK_INITIALIZER;
 pthread_mutex_t inst_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t bus_activity = PTHREAD_COND_INITIALIZER;
-pthread_mutex_t bus_activity_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mem_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int bus_write = 0;
+int *bus_signal;
+int num_threads = 2;
+
+void init_memory( byte* memory, int memory_size );
+
+void print_memory( byte* memory, int memory_size );
+
+// Helper function to print the cachelines
+void print_cachelines(cache *c, int cache_size);
+
+// Helper function to initialize the cachelines
+void initialize_cachelines(cache *c, int cache_size);
+
+void copy_back( byte *memory, byte val, byte addr );
+
+byte mem_fetch( byte *memory, byte addr );
+
+decoded decode_inst_line(char *buffer);
+
+void mem_write_back( byte* memory, cache* c, int cache_size);
+
+void broadcast( icn_bus* bus, int msg_type, int calling_thread, byte address);
+
+void cpu_loop(byte *memory, icn_bus* bus);
+
+// Run the simulation
+void run_simulation(int num_threads);
+
+int main(int argc, char *argv[]) {
+    if( argc > 1 ) {
+        num_threads = atoi(argv[1]);
+    }
+
+    omp_set_nested(1);
+    run_simulation(num_threads);
+    return 0;
+}
+
+// Run the simulation
+void run_simulation(int num_threads) {
+    // Initialize Global memory
+    // Let's assume the memory module holds about 24 bytes of data.
+    int memory_size = 24;
+    byte *memory = (byte *)malloc(sizeof(byte) * memory_size);
+    icn_bus *bus = malloc(sizeof(icn_bus));
+    init_memory(memory, memory_size);
+    print_memory(memory, memory_size);
+    bus_signal = malloc(sizeof(int)*num_threads);
+
+    omp_set_num_threads(num_threads); // Set the number of threads before entering the parallel region
+    #pragma omp parallel
+    {
+        cpu_loop(memory, bus);
+    }
+    printf("\n");
+    print_memory(memory, memory_size);
+    free(memory);
+    free(bus);
+}
 
 void init_memory( byte* memory, int memory_size ) {
     for( int i = 0; i < memory_size; i++ )
@@ -45,12 +105,19 @@ void initialize_cachelines(cache *c, int cache_size) {
 
 void copy_back( byte *memory, byte val, byte addr ) {
     // printf("copyback %d - %d\n", addr, val);
+
+    pthread_mutex_lock(&mem_lock);
     *(memory + addr) = val;
+    pthread_mutex_unlock(&mem_lock);
 }
 
 byte mem_fetch( byte *memory, byte addr ) {
     // printf("fetch %d - %d\n", addr, *(memory + addr));
-    return *(memory + addr);
+
+    pthread_mutex_lock(&mem_lock);
+    byte val = *(memory + addr);
+    pthread_mutex_unlock(&mem_lock);
+    return val;
 }
 
 decoded decode_inst_line(char *buffer) {
@@ -63,7 +130,6 @@ decoded decode_inst_line(char *buffer) {
         inst.type = 0;
         inst.value = -1;
         inst.address = addr;
-        // printf("%s %d\n", inst_type, inst.type);
     } else if (!strcmp(inst_type, "WR")) {
         int addr = 0;
         int val = 0;
@@ -71,20 +137,19 @@ decoded decode_inst_line(char *buffer) {
         inst.type = 1;
         inst.value = val;
         inst.address = addr;
-        // printf("%s %d\n", inst_type, inst.type);
     }
     return inst;
 }
 
 void mem_write_back( byte* memory, cache* c, int cache_size) {
+    pthread_mutex_lock(&mem_lock);
     for( int i = 0; i < cache_size; i++ ) {
         cache cacheline = *(c + i);
         if( cacheline.state == M )
         *(memory + cacheline.address) = cacheline.value;
     }
+    pthread_mutex_unlock(&mem_lock);
 }
-
-int bus_write = 0;
 
 void broadcast( icn_bus* bus, int msg_type, int calling_thread, byte address) {
     pthread_rwlock_wrlock(&bus_lock);
@@ -93,7 +158,9 @@ void broadcast( icn_bus* bus, int msg_type, int calling_thread, byte address) {
     bus->thread = calling_thread;
     // printf("Broadcasting..thread %d doing %d on %d\n", calling_thread, msg_type, address);
     bus_write = 1;
-    pthread_cond_broadcast(&bus_activity);
+    for(int i = 0; i < num_threads; i++) {
+        bus_signal[i] = 0;
+    }
     pthread_rwlock_unlock(&bus_lock);
 }
 
@@ -105,9 +172,9 @@ void cpu_loop(byte *memory, icn_bus* bus) {
     int thread_num = omp_get_thread_num();
     initialize_cachelines( c, cache_size);
     printf( "Thread %d Running\n", thread_num);
-
-    omp_set_num_threads(2);
     int processing = 1;
+    bus_signal[thread_num] = 0;
+
     #pragma omp parallel shared(c)
     {
         #pragma omp sections
@@ -128,7 +195,8 @@ void cpu_loop(byte *memory, icn_bus* bus) {
 
                     pthread_mutex_lock(&inst_lock);
                     cache cacheline = *(c + hash);
-
+                    // printf("Thread %d, insttype = %d, cache address = %d, inst addr = %d,  state = %d\n",
+                    //     thread_num, inst.type, cacheline.address, inst.address ,cacheline.state);
                     switch (cacheline.state)
                     {
                         case M:
@@ -140,9 +208,16 @@ void cpu_loop(byte *memory, icn_bus* bus) {
                                 if( cacheline.address == inst.address && inst.type == 0 )
                                     break;
                         default:
-                                broadcast(bus, inst.type, thread_num, inst.address);\
-                                sleep(0.01);
-                                pthread_rwlock_wrlock(&bus_lock);
+                                broadcast(bus, inst.type, thread_num, inst.address);
+                                sleep(0.5);
+                                // printf("Thread %d after sleep\n", thread_num);
+                                while(1) {
+                                    for(int i = 0; i < num_threads; i++) {
+                                        if(bus_signal[i] == 0)
+                                            continue;
+                                    }
+                                    break;
+                                }
                                 cacheline.address = inst.address;
                                 cacheline.value = mem_fetch( memory, inst.address);
                                 cacheline.state = S;
@@ -163,12 +238,11 @@ void cpu_loop(byte *memory, icn_bus* bus) {
 
                     // Update cache
                     *(c + hash) = cacheline;
-                    pthread_rwlock_unlock(&bus_lock);
+                    // pthread_rwlock_unlock(&bus_lock);
 
                     pthread_mutex_unlock(&inst_lock);
                 }
                 processing = 0;
-                // pthread_cond_signal(&bus_activity);
             }
             #pragma omp section
             {
@@ -177,35 +251,41 @@ void cpu_loop(byte *memory, icn_bus* bus) {
                 while( processing )
                 {
                     // printf("AAAAAAAAAAAAAAAAAAAAAA %d here\n", thread_num);
-                    if( bus_write ) {
-                        pthread_rwlock_rdlock(&bus_lock);
+                    if( bus_write == 1) {
+                        bus_signal[thread_num] = 0;
+                        // pthread_rwlock_rdlock(&bus_lock);
                         if( thread_num == bus->thread ) {
+                            // printf("Thread %d sleeping inside snooper.\n", thread_num);
                             sleep(0.01);
-                            pthread_rwlock_unlock(&bus_lock);
-                            continue;
+                            bus_signal[thread_num] = 1;
                         }
-                        int hash = bus->address % cache_size;
-                        cache cacheline = *(c + hash);
+                        else {
+                            int hash = bus->address % cache_size;
+                            cache cacheline = *(c + hash);
+                            // printf("Thread %d processing bus write- type: %d, address: %d, cacheaddress: %d, cachestate: %d, cachevalue: %d\n", 
+                            //         thread_num, bus->msg, bus->address, cacheline.address, cacheline.state, cacheline.value);
+                            if( cacheline.address == bus->address ) {
 
-                        if( cacheline.address == bus->address ) {
-
-                            switch( cacheline.state )
-                            {
-                                case M:
-                                        // printf("Snooping thread %d, copyback %d to %d\n", thread_num, cacheline.value, cacheline.address);
-                                        copy_back( memory, cacheline.value, cacheline.address);
-                                        if( bus->msg == 0 )
-                                            cacheline.state = S;
-                                        else
+                                switch( cacheline.state )
+                                {
+                                    case M:
+                                            // printf("Snooping thread %d, copyback %d to %d\n", thread_num, cacheline.value, cacheline.address);
+                                            if( bus->msg == 0 ) {
+                                                copy_back( memory, cacheline.value, cacheline.address);
+                                                cacheline.state = S;
+                                            }
+                                            else
+                                                cacheline.state = I;
+                                            break;
+                                    case S:
+                                            // printf("Snooping thread %d, invalidate %d\n", thread_num, cacheline.address);
                                             cacheline.state = I;
-                                        break;
-                                case S:
-                                        // printf("Snooping thread %d, invalidate %d\n", thread_num, cacheline.address);
-                                        cacheline.state = I;
+                                }
+                                *(c + hash) = cacheline;
                             }
-                            *(c + hash) = cacheline;
+                            bus_signal[thread_num] = 1;
                         }
-                        pthread_rwlock_unlock(&bus_lock);
+                        // pthread_rwlock_unlock(&bus_lock);
                         bus_write = 0;
                     }
                 }
@@ -213,40 +293,9 @@ void cpu_loop(byte *memory, icn_bus* bus) {
             }
         }
     }
+
     pthread_rwlock_wrlock(&bus_lock);
     mem_write_back( memory, c, cache_size);
     pthread_rwlock_unlock(&bus_lock);
     free(c);
-}
-
-// Run the simulation
-void run_simulation(int num_threads) {
-    // Initialize Global memory
-    // Let's assume the memory module holds about 24 bytes of data.
-    int memory_size = 24;
-    byte *memory = (byte *)malloc(sizeof(byte) * memory_size);
-    icn_bus *bus = malloc(sizeof(icn_bus));
-    init_memory(memory, memory_size);
-    print_memory(memory, memory_size);
-
-    omp_set_num_threads(num_threads); // Set the number of threads before entering the parallel region
-    #pragma omp parallel
-    {
-        cpu_loop(memory, bus);
-    }
-    printf("\n");
-    print_memory(memory, memory_size);
-    free(memory);
-    free(bus);
-}
-
-int main(int argc, char *argv[]) {
-    int num_threads = 2;
-    if( argc > 1 ) {
-        num_threads = atoi(argv[1]);
-    }
-
-    omp_set_nested(1);
-    run_simulation(num_threads);
-    return 0;
 }
