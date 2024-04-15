@@ -14,8 +14,10 @@ int bus_write = 0;
 int *bus_signal;
 int num_threads = 2;
 
+// Initialize memory
 void init_memory( byte* memory, int memory_size );
 
+// Print values stored in memory
 void print_memory( byte* memory, int memory_size );
 
 // Helper function to print the cachelines
@@ -30,6 +32,7 @@ void copy_back( byte *memory, byte val, byte addr );
 // Fetch value from memory stored at specific address
 byte mem_fetch( byte *memory, byte addr );
 
+// Decode instruction line
 decoded decode_inst_line(char *buffer);
 
 // Write back modified values in cache to memory
@@ -38,6 +41,7 @@ void mem_write_back( byte* memory, cache* c, int cache_size);
 // Broadcast message on bus - bus write
 void broadcast( icn_bus* bus, int msg_type, int calling_thread, byte address);
 
+// Function run by each main thread simulating a processor
 void cpu_loop(byte *memory, icn_bus* bus);
 
 // Run the simulation
