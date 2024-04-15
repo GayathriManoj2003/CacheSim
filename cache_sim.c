@@ -24,14 +24,18 @@ void print_cachelines(cache *c, int cache_size);
 // Helper function to initialize the cachelines
 void initialize_cachelines(cache *c, int cache_size);
 
+// Write back value to memory
 void copy_back( byte *memory, byte val, byte addr );
 
+// Fetch value from memory stored at specific address
 byte mem_fetch( byte *memory, byte addr );
 
 decoded decode_inst_line(char *buffer);
 
+// Write back modified values in cache to memory
 void mem_write_back( byte* memory, cache* c, int cache_size);
 
+// Broadcast message on bus - bus write
 void broadcast( icn_bus* bus, int msg_type, int calling_thread, byte address);
 
 void cpu_loop(byte *memory, icn_bus* bus);
@@ -86,7 +90,6 @@ void print_memory( byte* memory, int memory_size ) {
     printf("\n\n");
 }
 
-// Helper function to print the cachelines
 void print_cachelines(cache *c, int cache_size) {
     for (int i = 0; i < cache_size; i++) {
         cache cacheline = *(c + i);
@@ -94,7 +97,6 @@ void print_cachelines(cache *c, int cache_size) {
     }
 }
 
-// Helper function to initialize the cachelines
 void initialize_cachelines(cache *c, int cache_size) {
     for (int i = 0; i < cache_size; i++) {
         cache cacheline = *(c + i);
@@ -189,7 +191,6 @@ void cpu_loop(byte *memory, icn_bus* bus) {
                 // Decode instructions and execute them.
                 while (fgets(inst_line, sizeof(inst_line), inst_file)) {
 
-                    // printf("Inst line %s\n", inst_line);
                     decoded inst = decode_inst_line(inst_line);
                     int hash = inst.address % cache_size;
 
@@ -209,7 +210,6 @@ void cpu_loop(byte *memory, icn_bus* bus) {
                                     break;
                         default:
                                 broadcast(bus, inst.type, thread_num, inst.address);
-                                sleep(0.5);
                                 // printf("Thread %d after sleep\n", thread_num);
                                 while(1) {
                                     for(int i = 0; i < num_threads; i++) {
@@ -218,6 +218,7 @@ void cpu_loop(byte *memory, icn_bus* bus) {
                                     }
                                     break;
                                 }
+                                sleep(0.5);
                                 cacheline.address = inst.address;
                                 cacheline.value = mem_fetch( memory, inst.address);
                                 cacheline.state = S;
@@ -238,7 +239,6 @@ void cpu_loop(byte *memory, icn_bus* bus) {
 
                     // Update cache
                     *(c + hash) = cacheline;
-                    // pthread_rwlock_unlock(&bus_lock);
 
                     pthread_mutex_unlock(&inst_lock);
                 }
@@ -250,7 +250,6 @@ void cpu_loop(byte *memory, icn_bus* bus) {
                 // printf("Snooping %d\n", thread_num);
                 while( processing )
                 {
-                    // printf("AAAAAAAAAAAAAAAAAAAAAA %d here\n", thread_num);
                     if( bus_write == 1) {
                         bus_signal[thread_num] = 0;
                         // pthread_rwlock_rdlock(&bus_lock);
